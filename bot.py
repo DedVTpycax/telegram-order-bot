@@ -13,7 +13,7 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# Кастомные emoji id (то, что ты дал)
+# Кастомные emoji id
 EMOJI_WAVE_ID = "5202151555276506786"      # вместо 👋
 EMOJI_PUZZLE_ID = "5202042871129082406"    # вместо 🧩
 EMOJI_BRICK_ID = "5201721092179264394"     # вместо 🧱
@@ -41,7 +41,6 @@ def build_custom_emoji_message(parts: list[tuple[str, str | None]]) -> tuple[str
 
     for chunk_text, emoji_id in parts:
         if emoji_id:
-            # запоминаем текущий offset (в utf-16), вставляем placeholder
             offset = utf16_len(text_out)
             text_out += placeholder
             entities.append(
@@ -57,10 +56,22 @@ def build_custom_emoji_message(parts: list[tuple[str, str | None]]) -> tuple[str
     return text_out, entities
 
 
+def add_bold_entity(text: str, entities: list[MessageEntity], substring: str):
+    """
+    Делает первое вхождение substring жирным через entities (UTF-16 offsets).
+    """
+    idx = text.find(substring)
+    if idx == -1:
+        return
+    offset = utf16_len(text[:idx])
+    length = utf16_len(substring)
+    entities.append(MessageEntity(type="bold", offset=offset, length=length))
+
+
 async def safe_send(bot, chat_id: int, text: str, entities: list[MessageEntity] | None, fallback_text: str):
     """
     Пробуем отправить текст с entities.
-    Если Telegram ругается на entities — отправляем fallback текст без кастомных emoji.
+    Если Telegram ругается на entities — отправляем fallback текст без кастомных emoji/форматирования.
     """
     try:
         return await bot.send_message(chat_id=chat_id, text=text, entities=entities)
@@ -71,7 +82,6 @@ async def safe_send(bot, chat_id: int, text: str, entities: list[MessageEntity] 
 
 def build_user_line(username: str) -> tuple[str, list[MessageEntity] | None]:
     if CUSTOM_EMOJI_ID:
-        # "Пользователь: <custom> @username"
         text, ents = build_custom_emoji_message([
             ("Пользователь: ", None),
             (" ", CUSTOM_EMOJI_ID),
@@ -82,16 +92,9 @@ def build_user_line(username: str) -> tuple[str, list[MessageEntity] | None]:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Текст приветствия (как вариант №2, который тебе понравился)
-    # Вставляем кастомные emoji:
-    # 👋 -> EMOJI_WAVE_ID
-    # 🧩 -> EMOJI_PUZZLE_ID
-    # 🧱 -> EMOJI_BRICK_ID
-    # 🎨 -> EMOJI_PALETTE_ID
-
     parts = [
         (" ", EMOJI_WAVE_ID),
-        (" Привет! Добро пожаловать в <b>ScaleTeam</b>!\n\n", None),
+        (" Привет! Добро пожаловать в ScaleTeam!\n\n", None),
         ("Мы занимаемся:\n", None),
 
         ("• ", None),
@@ -111,11 +114,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text, ents = build_custom_emoji_message(parts)
 
-    # Фолбэк на обычные эмодзи (если у кого-то Telegram/клиент не примет entities)
+    # Делаем ScaleTeam жирным
+    add_bold_entity(text, ents, "ScaleTeam")
+
     fallback = (
-        "👋 Привет! Добро пожаловать в <b>ScaleTeam</b>!\n\n"
+        "👋 Привет! Добро пожаловать в ScaleTeam!\n\n"
         "Мы занимаемся:\n"
-        "• 🧩 модами на разные версии!\n"
+        "• 🧩 модами\n"
         "• 🧱 картами и постройками!\n"
         "• 🎨 3D-моделями и ассетами!\n\n"
         "Напиши нам о своей идее! Мы обязательно ответим и сориентируем!"
@@ -137,7 +142,6 @@ async def handle_user_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     username = f"@{user.username}" if user.username else "без username"
 
-    # 1) админу строка "Пользователь: @username"
     text, ents = build_user_line(username)
     try:
         info = await context.bot.send_message(chat_id=ADMIN_ID, text=text, entities=ents)
@@ -145,7 +149,6 @@ async def handle_user_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info = await context.bot.send_message(chat_id=ADMIN_ID, text=f"Пользователь: {username}")
     routes[info.message_id] = user_chat_id
 
-    # 2) админу пересылка контента клиента
     fwd = await context.bot.forward_message(
         chat_id=ADMIN_ID,
         from_chat_id=user_chat_id,
@@ -185,4 +188,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
