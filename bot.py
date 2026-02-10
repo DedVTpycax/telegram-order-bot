@@ -17,6 +17,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.message.from_user
     text = update.message.text
 
+    print("USER MESSAGE:", text)
+    print("ADMIN ID:", ADMIN_ID)
+
     username = f"@{user.username}" if user.username else "без username"
     user_id = user.id
 
@@ -35,6 +38,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(
         "Сообщение отправлено. Ожидайте ответа."
     )
+
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message is None:
@@ -63,4 +67,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
