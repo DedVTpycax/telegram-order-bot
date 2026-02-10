@@ -1,8 +1,9 @@
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+import os
 
-TOKEN = "8548761205:AAEh5VcBl19H-imS8Qmmf0W2zJD11RTmJL4"
-ADMIN_ID = 1387024303  # <-- ВСТАВЬ СВОЙ TELEGRAM ID
+TOKEN = os.getenv("TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # Храним связь клиент <-> сообщение
 user_sessions = {}
@@ -62,3 +63,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
