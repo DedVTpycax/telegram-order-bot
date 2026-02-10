@@ -6,75 +6,61 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, Con
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Чтобы не спамило getUpdates в логах
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# (Опционально) сюда можно вписать custom_emoji_id, если хочешь использовать Telegram Custom Emoji.
-# Если пусто/None — будут использоваться обычные эмодзи.
-CUSTOM_EMOJI_ID = os.getenv("CUSTOM_EMOJI_ID")  # например "5337327812345678901"
+# Твой кастомный премиум-эмодзи для приветствия
+START_EMOJI_ID = "5202151555276506786"
 
-# Ключ: message_id в чате админа (то, на что админ отвечает reply)
-# Значение: chat_id клиента, куда слать ответ
+# (Опционально) кастомный эмодзи для строки "Пользователь: ..."
+CUSTOM_EMOJI_ID = os.getenv("CUSTOM_EMOJI_ID")  # можно не задавать
+
+# message_id (в чате админа) -> chat_id клиента
 routes: dict[int, int] = {}
+
+
+def build_custom_emoji(prefix: str, emoji_id: str, suffix: str) -> tuple[str, list[MessageEntity]]:
+    """
+    Вставляет кастомный эмодзи в текст через placeholder + entities.
+    Возвращает (text, entities).
+    """
+    placeholder = "🙂"  # одиночный символ, на который навесим custom emoji
+    text = f"{prefix}{placeholder}{suffix}"
+    offset = text.index(placeholder)
+    entities = [
+        MessageEntity(
+            type="custom_emoji",
+            offset=offset,
+            length=1,
+            custom_emoji_id=emoji_id,
+        )
+    ]
+    return text, entities
 
 
 def build_user_line(username: str) -> tuple[str, list[MessageEntity] | None]:
     """
-    Возвращает (text, entities) для строки "Пользователь: <эмодзи> @username"
-    Если задан CUSTOM_EMOJI_ID — вставляем кастомный эмодзи через entity.
-    Иначе используем обычный эмодзи 👤.
+    Строка админу: "Пользователь: <эмодзи> @username"
+    Если CUSTOM_EMOJI_ID задан — используем кастомный, иначе обычный 👤.
     """
     if CUSTOM_EMOJI_ID:
-        # Вставляем плейсхолдер-символ (один символ), на него навешиваем custom_emoji entity.
-        # Важно: offset считается по строке.
-        placeholder = "🙂"  # любой одиночный символ
-        text = f"Пользователь: {placeholder} {username}"
-        # offset: длина "Пользователь: " = 12 (включая пробел после двоеточия) — но лучше считать программно
-        offset = text.index(placeholder)
-        entities = [
-            MessageEntity(
-                type="custom_emoji",
-                offset=offset,
-                length=1,
-                custom_emoji_id=CUSTOM_EMOJI_ID,
-            )
-        ]
-        return text, entities
-
-    # Обычный эмодзи
+        return build_custom_emoji("Пользователь: ", CUSTOM_EMOJI_ID, f" {username}")
     return f"Пользователь: 👤 {username}", None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! 👋\nНапиши сообщение (текст/файл/голос/видео), и я передам его нашей команде."
+    # Ровно нужное приветствие:
+    # <кастомный смайлик> Привет! Я Бот-Помощник, я помогу настроить идеальный диалог между тобой и командой! Напиши свой вопрос!
+    greeting_suffix = (
+        " Привет! Я Бот-Помощник, я помогу настроить идеальный диалог между тобой и командой! "
+        "Напиши свой вопрос!"
     )
-
-
-async def entities(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Команда для получения custom_emoji_id.
-    Использование:
-      1) /entities
-      2) Затем отправь боту сообщение, где есть нужный кастомный эмодзи
-    Бот ответит списком entities, где будет custom_emoji_id.
-    """
-    msg = update.message
-    if not msg or not msg.entities:
-        await msg.reply_text(
-            "Пришли сообщение с кастомным эмодзи (из набора Telegram), "
-            "и я покажу его custom_emoji_id.\n"
-            "Важно: entities должны быть в сообщении."
-        )
-        return
-
-    lines = []
-    for e in msg.entities:
-        cid = getattr(e, "custom_emoji_id", None)
-        lines.append(
-            f"type={e.type}, offset={e.offset}, length={e.length}, custom_emoji_id={cid}"
-        )
-    await msg.reply_text("\n".join(lines))
+    text, ents = build_custom_emoji("", START_EMOJI_ID, greeting_suffix)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=text, entities=ents)
 
 
 async def handle_user_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -85,20 +71,18 @@ async def handle_user_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     username = f"@{user.username}" if user.username else "без username"
 
-    # 1) Отправляем админу строку "Пользователь: ...", с кастомным эмодзи (если задан)
+    # 1) Админу: "Пользователь: @username"
     text, ents = build_user_line(username)
     info = await context.bot.send_message(chat_id=ADMIN_ID, text=text, entities=ents)
     routes[info.message_id] = user_chat_id
 
-    # 2) Пересылаем само сообщение клиента (любой тип: файлы/voice/video/etc)
+    # 2) Админу: само сообщение клиента (любой тип)
     fwd = await context.bot.forward_message(
         chat_id=ADMIN_ID,
         from_chat_id=user_chat_id,
         message_id=msg.message_id,
     )
     routes[fwd.message_id] = user_chat_id
-
-    # Подтверждение пользователю убрано
 
 
 async def handle_admin_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,10 +96,8 @@ async def handle_admin_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_chat_id:
         return
 
-    # copy() переносит любой тип контента, отправитель для клиента = бот (админ скрыт)
+    # copy() переносит любые типы сообщений, отправителем для клиента будет бот (админ скрыт)
     await msg.copy(chat_id=user_chat_id)
-
-    # Подтверждение админу убрано
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -126,7 +108,6 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("entities", entities))
 
     # Клиенты: всё, кроме команд, и не админ
     app.add_handler(
