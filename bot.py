@@ -1,4 +1,3 @@
-```python
 import os
 import logging
 from telegram import Update, MessageEntity
@@ -145,4 +144,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
