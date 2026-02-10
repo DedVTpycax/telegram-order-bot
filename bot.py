@@ -6,7 +6,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, Con
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Чтобы не спамило getUpdates в логах
+# Убрать спам httpx/telegram в логах
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 
@@ -25,10 +25,10 @@ routes: dict[int, int] = {}
 
 def build_custom_emoji(prefix: str, emoji_id: str, suffix: str) -> tuple[str, list[MessageEntity]]:
     """
-    Вставляет кастомный эмодзи в текст через placeholder + entities.
-    Возвращает (text, entities).
+    Вставляет кастомный эмодзи через placeholder + entities.
+    Важно: placeholder должен быть 1 UTF-16 unit (НЕ ставить 🙂/👋 и т.п.).
     """
-    placeholder = "🙂"  # одиночный символ, на который навесим custom emoji
+    placeholder = "X"  # 1 UTF-16 unit
     text = f"{prefix}{placeholder}{suffix}"
     offset = text.index(placeholder)
     entities = [
@@ -44,7 +44,7 @@ def build_custom_emoji(prefix: str, emoji_id: str, suffix: str) -> tuple[str, li
 
 def build_user_line(username: str) -> tuple[str, list[MessageEntity] | None]:
     """
-    Строка админу: "Пользователь: <эмодзи> @username"
+    Админу: "Пользователь: <эмодзи> @username"
     Если CUSTOM_EMOJI_ID задан — используем кастомный, иначе обычный 👤.
     """
     if CUSTOM_EMOJI_ID:
@@ -53,18 +53,15 @@ def build_user_line(username: str) -> tuple[str, list[MessageEntity] | None]:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Ровно нужное приветствие:
-    # <кастомный смайлик> Привет! Я Бот-Помощник, я помогу настроить идеальный диалог между тобой и командой! Напиши свой вопрос!
-    greeting_suffix = (
+    greeting = (
         " Привет! Я Бот-Помощник, я помогу настроить идеальный диалог между тобой и командой! "
         "Напиши свой вопрос!"
     )
-    text, ents = build_custom_emoji("", START_EMOJI_ID, greeting_suffix)
+    text, ents = build_custom_emoji("", START_EMOJI_ID, greeting)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text, entities=ents)
 
 
 async def handle_user_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Любое сообщение от клиента -> админу (username + пересылка контента)."""
     msg = update.message
     user = msg.from_user
     user_chat_id = update.effective_chat.id
@@ -86,7 +83,6 @@ async def handle_user_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_admin_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Любое сообщение от админа -> клиенту (если это reply на сообщение клиента/строку 'Пользователь: ...')."""
     msg = update.message
     if not msg.reply_to_message:
         return
@@ -96,7 +92,7 @@ async def handle_admin_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_chat_id:
         return
 
-    # copy() переносит любые типы сообщений, отправителем для клиента будет бот (админ скрыт)
+    # Отправителем для клиента будет бот (админ скрыт), типы сообщений сохраняются
     await msg.copy(chat_id=user_chat_id)
 
 
@@ -108,19 +104,13 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-
-    # Клиенты: всё, кроме команд, и не админ
-    app.add_handler(
-        MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.User(ADMIN_ID), handle_user_any)
-    )
-
-    # Админ: всё, кроме команд
-    app.add_handler(
-        MessageHandler(filters.ALL & ~filters.COMMAND & filters.User(ADMIN_ID), handle_admin_any)
-    )
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.User(ADMIN_ID), handle_user_any))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & filters.User(ADMIN_ID), handle_admin_any))
 
     app.add_error_handler(error_handler)
-    app.run_polling()
+
+    # Если бот раньше работал через webhook, это безопасно; конфликт polling не решает.
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
