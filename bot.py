@@ -1,98 +1,159 @@
 import os
 import logging
 from telegram import Update, MessageEntity
+from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Убрать спам getUpdates в логах
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# Опционально: custom emoji id (Telegram custom emoji). Если не задан — используем обычные эмодзи.
-CUSTOM_EMOJI_ID = os.getenv("CUSTOM_EMOJI_ID")  # пример: "5337327812345678901"
+# Кастомные emoji id (то, что ты дал)
+EMOJI_WAVE_ID = "5202151555276506786"      # вместо 👋
+EMOJI_PUZZLE_ID = "5202042871129082406"    # вместо 🧩
+EMOJI_BRICK_ID = "5201721092179264394"     # вместо 🧱
+EMOJI_PALETTE_ID = "5202143098485899804"   # вместо 🎨
 
-# message_id (в чате админа) -> chat_id клиента
+# (опционально) кастомный эмодзи для строки "Пользователь: ..."
+CUSTOM_EMOJI_ID = os.getenv("CUSTOM_EMOJI_ID")
+
 routes: dict[int, int] = {}
 
 
-def build_user_line(username: str) -> tuple[str, list[MessageEntity] | None]:
-    """
-    "Пользователь: <эмодзи> @username"
-    Если задан CUSTOM_EMOJI_ID — вставляем custom emoji entity на плейсхолдер-символ.
-    """
-    if CUSTOM_EMOJI_ID:
-        placeholder = "🙂"  # одиночный символ
-        text = f"Пользователь: {placeholder} {username}"
-        offset = text.index(placeholder)
-        entities = [
-            MessageEntity(
-                type="custom_emoji",
-                offset=offset,
-                length=1,
-                custom_emoji_id=CUSTOM_EMOJI_ID,
-            )
-        ]
-        return text, entities
+def utf16_len(s: str) -> int:
+    """Длина строки в UTF-16 code units (то, что требует Telegram для offset/length)."""
+    return len(s.encode("utf-16-le")) // 2
 
+
+def build_custom_emoji_message(parts: list[tuple[str, str | None]]) -> tuple[str, list[MessageEntity]]:
+    """
+    parts: список кусков (text, custom_emoji_id или None)
+    Если custom_emoji_id задан — вставляем placeholder (❤) и навешиваем на него custom_emoji entity.
+    """
+    placeholder = "❤"  # один символ, обычно 1 UTF-16 unit
+    text_out = ""
+    entities: list[MessageEntity] = []
+
+    for chunk_text, emoji_id in parts:
+        if emoji_id:
+            # запоминаем текущий offset (в utf-16), вставляем placeholder
+            offset = utf16_len(text_out)
+            text_out += placeholder
+            entities.append(
+                MessageEntity(
+                    type="custom_emoji",
+                    offset=offset,
+                    length=1,
+                    custom_emoji_id=emoji_id,
+                )
+            )
+        text_out += chunk_text
+
+    return text_out, entities
+
+
+async def safe_send(bot, chat_id: int, text: str, entities: list[MessageEntity] | None, fallback_text: str):
+    """
+    Пробуем отправить текст с entities.
+    Если Telegram ругается на entities — отправляем fallback текст без кастомных emoji.
+    """
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, entities=entities)
+    except BadRequest as e:
+        logger.warning("Send with entities failed: %s", e)
+        return await bot.send_message(chat_id=chat_id, text=fallback_text)
+
+
+def build_user_line(username: str) -> tuple[str, list[MessageEntity] | None]:
+    if CUSTOM_EMOJI_ID:
+        # "Пользователь: <custom> @username"
+        text, ents = build_custom_emoji_message([
+            ("Пользователь: ", None),
+            (" ", CUSTOM_EMOJI_ID),
+            (f"{username}", None),
+        ])
+        return text, ents
     return f"Пользователь: 👤 {username}", None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Напиши сообщение (текст/файл/голос/видео), и я передам его нашей команде."
+    # Текст приветствия (как вариант №2, который тебе понравился)
+    # Вставляем кастомные emoji:
+    # 👋 -> EMOJI_WAVE_ID
+    # 🧩 -> EMOJI_PUZZLE_ID
+    # 🧱 -> EMOJI_BRICK_ID
+    # 🎨 -> EMOJI_PALETTE_ID
+
+    parts = [
+        (" ", EMOJI_WAVE_ID),
+        (" Привет!\n", None),
+        ("Добро пожаловать в ScaleTeam.\n", None),
+        ("Мы занимаемся:\n", None),
+
+        ("• ", None),
+        (" ", EMOJI_PUZZLE_ID),
+        (" модами (Forge/Fabric и др.)\n", None),
+
+        ("• ", None),
+        (" ", EMOJI_BRICK_ID),
+        (" картами и постройками (спавны, лобби, RPG-миры)\n", None),
+
+        ("• ", None),
+        (" ", EMOJI_PALETTE_ID),
+        (" 3D-моделями и ассетами\n\n", None),
+
+        ("Напиши сообщение: что нужно + для чего + сроки/бюджет (если есть). Мы ответим и сориентируем.", None),
+    ]
+
+    text, ents = build_custom_emoji_message(parts)
+
+    # Фолбэк на обычные эмодзи (если у кого-то Telegram/клиент не примет entities)
+    fallback = (
+        "👋 Привет!\n"
+        "Добро пожаловать в ScaleTeam.\n"
+        "Мы занимаемся:\n"
+        "• 🧩 модами (Forge/Fabric и др.)\n"
+        "• 🧱 картами и постройками (спавны, лобби, RPG-миры)\n"
+        "• 🎨 3D-моделями и ассетами\n\n"
+        "Напиши сообщение: что нужно + для чего + сроки/бюджет (если есть). Мы ответим и сориентируем."
     )
 
-
-async def entities(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Получить custom_emoji_id:
-    1) отправь боту сообщение с кастомным эмодзи
-    2) ответь командой /entities на это сообщение (reply)
-       или просто вызови /entities и затем отправь сообщение (не всегда сохраняет entities у команды)
-    """
-    msg = update.message
-
-    # Если /entities отправили reply на сообщение — берём entities из того сообщения
-    target = msg.reply_to_message if msg and msg.reply_to_message else msg
-
-    if not target or not target.entities:
-        await msg.reply_text("Сделай reply /entities на сообщение с кастомным эмодзи.")
-        return
-
-    lines = []
-    for e in target.entities:
-        cid = getattr(e, "custom_emoji_id", None)
-        if cid:
-            lines.append(f"custom_emoji_id={cid} (offset={e.offset}, length={e.length})")
-    await msg.reply_text("\n".join(lines) if lines else "В сообщении нет custom_emoji entities.")
+    await safe_send(
+        bot=context.bot,
+        chat_id=update.effective_chat.id,
+        text=text,
+        entities=ents,
+        fallback_text=fallback,
+    )
 
 
 async def handle_user_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    user = msg.from_user
     user_chat_id = update.effective_chat.id
+    user = msg.from_user
 
     username = f"@{user.username}" if user.username else "без username"
 
-    # 1) Строка админу: только "Пользователь: @username"
+    # 1) админу строка "Пользователь: @username"
     text, ents = build_user_line(username)
-    info = await context.bot.send_message(chat_id=ADMIN_ID, text=text, entities=ents)
+    try:
+        info = await context.bot.send_message(chat_id=ADMIN_ID, text=text, entities=ents)
+    except BadRequest:
+        info = await context.bot.send_message(chat_id=ADMIN_ID, text=f"Пользователь: {username}")
     routes[info.message_id] = user_chat_id
 
-    # 2) Пересылка сообщения клиента (любые типы)
+    # 2) админу пересылка контента клиента
     fwd = await context.bot.forward_message(
         chat_id=ADMIN_ID,
         from_chat_id=user_chat_id,
         message_id=msg.message_id,
     )
     routes[fwd.message_id] = user_chat_id
-
-    # Подтверждения "отправлено" убраны
 
 
 async def handle_admin_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,13 +177,12 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("entities", entities))
-
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.User(ADMIN_ID), handle_user_any))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & filters.User(ADMIN_ID), handle_admin_any))
 
     app.add_error_handler(error_handler)
-    app.run_polling()
+
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
