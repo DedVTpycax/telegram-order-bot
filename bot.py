@@ -1,6 +1,7 @@
 import os
 import logging
 from telegram import Update, MessageEntity
+from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO)
@@ -12,10 +13,10 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# Твой кастомный премиум-эмодзи
+# Твой кастомный премиум-эмодзи для приветствия
 START_EMOJI_ID = "5202151555276506786"
 
-# (Опционально) кастомный эмодзи для строки "Пользователь: ..."
+# (опционально) кастомный эмодзи для строки "Пользователь: ..."
 CUSTOM_EMOJI_ID = os.getenv("CUSTOM_EMOJI_ID")
 
 routes: dict[int, int] = {}
@@ -23,10 +24,11 @@ routes: dict[int, int] = {}
 
 def custom_emoji_prefix(emoji_id: str, text_after: str) -> tuple[str, list[MessageEntity]]:
     """
-    Самый надёжный формат: placeholder в начале строки.
-    Тогда offset=0 и не бывает рассинхрона.
+    Надёжный вариант:
+    - эмодзи-плейсхолдер '❤' (1 UTF-16 unit)
+    - offset=0 length=1
     """
-    placeholder = "X"  # 1 UTF-16 unit
+    placeholder = "❤"  # U+2764, обычно 1 UTF-16 unit
     text = f"{placeholder}{text_after}"
     entities = [
         MessageEntity(
@@ -39,34 +41,56 @@ def custom_emoji_prefix(emoji_id: str, text_after: str) -> tuple[str, list[Messa
     return text, entities
 
 
+async def safe_send_with_custom_emoji(bot, chat_id: int, emoji_id: str, text_after: str, fallback_text: str):
+    """
+    Пытаемся отправить с кастомным эмодзи.
+    Если Telegram отклонит entities (Entity_text_invalid и т.п.) — отправляем fallback без кастома.
+    """
+    text, ents = custom_emoji_prefix(emoji_id, text_after)
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, entities=ents)
+    except BadRequest as e:
+        logger.warning("Custom emoji send failed: %s", e)
+        return await bot.send_message(chat_id=chat_id, text=fallback_text)
+
+
 def build_user_line(username: str) -> tuple[str, list[MessageEntity] | None]:
     if CUSTOM_EMOJI_ID:
-        # "X Пользователь: @username" (X станет кастомным эмодзи)
+        # "❤ Пользователь: @username" (❤ будет заменён на кастомный эмодзи)
         text, ents = custom_emoji_prefix(CUSTOM_EMOJI_ID, f" Пользователь: {username}")
         return text, ents
     return f"Пользователь: 👤 {username}", None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    greeting = (
-        " Привет! Я Бот-Помощник, я помогу настроить идеальный диалог между тобой и командой! "
-        "Напиши свой вопрос!"
+    text_after = " Привет! Я Бот-Помощник, я помогу настроить идеальный диалог между тобой и командой! Напиши свой вопрос!"
+    fallback = "Привет! Я Бот-Помощник, я помогу настроить идеальный диалог между тобой и командой! Напиши свой вопрос!"
+    await safe_send_with_custom_emoji(
+        bot=context.bot,
+        chat_id=update.effective_chat.id,
+        emoji_id=START_EMOJI_ID,
+        text_after=text_after,
+        fallback_text=fallback,
     )
-    text, ents = custom_emoji_prefix(START_EMOJI_ID, greeting)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=text, entities=ents)
 
 
 async def handle_user_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    user = msg.from_user
     user_chat_id = update.effective_chat.id
+    user = msg.from_user
 
     username = f"@{user.username}" if user.username else "без username"
 
+    # 1) админу строка "Пользователь: @username"
     text, ents = build_user_line(username)
-    info = await context.bot.send_message(chat_id=ADMIN_ID, text=text, entities=ents)
+    try:
+        info = await context.bot.send_message(chat_id=ADMIN_ID, text=text, entities=ents)
+    except BadRequest:
+        # если кастомная сущность для строки админу вдруг не пройдёт — отправляем без неё
+        info = await context.bot.send_message(chat_id=ADMIN_ID, text=f"Пользователь: {username}")
     routes[info.message_id] = user_chat_id
 
+    # 2) админу пересылка контента клиента
     fwd = await context.bot.forward_message(
         chat_id=ADMIN_ID,
         from_chat_id=user_chat_id,
@@ -96,12 +120,12 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.User(ADMIN_ID), handle_user_any))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & filters.User(ADMIN_ID), handle_admin_any))
 
     app.add_error_handler(error_handler)
 
+    # drop_pending_updates не решает Conflict, но полезно при деплоях
     app.run_polling(drop_pending_updates=True)
 
 
